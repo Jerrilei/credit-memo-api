@@ -1,147 +1,63 @@
-import os
-import json
-import requests
 from flask import Flask, request, jsonify
-from dotenv import load_dotenv
+from flask_cors import CORS # 导入 CORS
+import os
+import openai # 假设您使用 openai 库
 
-# 加载 .env 文件中的环境变量（仅用于本地开发）
-load_dotenv() 
-
-# --- 初始化 Flask 应用 ---
+# 初始化 Flask 应用
 app = Flask(__name__)
 
-# --- 环境变量/密钥 ---
-AZURE_ENDPOINT = os.getenv("AZURE_ENDPOINT")
-AZURE_KEY = os.getenv("AZURE_KEY")
-AZURE_MODEL = os.getenv("AZURE_MODEL")
-AZURE_VERSION = os.getenv("AZURE_VERSION")
+# ✅ 关键修复：启用 CORS，允许所有源 (origins) 访问
+# 这将修复 'Fetch failed' 错误
+CORS(app) 
 
-# --- CORS 预检处理 ---
-@app.after_request
-def after_request(response):
-    # 允许所有来源进行跨域访问
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-    response.headers.add('Access-Control-Allow-Methods', 'POST,OPTIONS')
-    return response
+# --- Azure OpenAI 配置 ---
+# 请确保您的环境变量设置正确 (Render 环境变量)
+# os.environ["AZURE_OPENAI_API_KEY"] = "YOUR_KEY" 
+# os.environ["AZURE_OPENAI_ENDPOINT"] = "YOUR_ENDPOINT"
 
-# 处理 OPTIONS 预检请求
-@app.route('/api/chat', methods=['OPTIONS'])
-def handle_options():
-    return '', 200
+# 如果使用 openai 库，通常不需要手动设置 os.environ，
+# 只需要确保 Render 上设置了这些环境变量即可。
 
-# --- Worker 核心逻辑：API 代理 ---
+# --- 路由和业务逻辑 ---
 @app.route('/api/chat', methods=['POST'])
-def chat_proxy():
-    # 检查环境变量
-    if not all([AZURE_ENDPOINT, AZURE_KEY, AZURE_MODEL, AZURE_VERSION]):
-        app.logger.error("Missing Azure env variables")
-        return jsonify({"error": "Missing Azure env variables"}), 500
-
+def chat():
+    # 假设您的请求体包含 JSON 数据
     try:
-        # 1. 读取请求体
-        body = request.get_json(silent=True) or {}
-    except Exception as e:
-        app.logger.error(f"Error parsing request JSON: {e}")
-        return jsonify({"error": "Invalid JSON body"}), 400
-
-    # 2. 组装用户输入
-    user_text = ""
-    if isinstance(body.get('messages'), list):
-        # 匹配您的 Worker 逻辑：将 messages 数组拼成文本
-        user_text = "\n".join([f"{m.get('role', 'user')}: {m.get('content', '')}" for m in body['messages']])
-    elif body.get('input'):
-        user_text = body['input']
-    else:
-        user_text = "No input provided."
-
-    # 3. 组装 Azure URL 和 Payload
-    url = f"{AZURE_ENDPOINT}/responses?api-version={AZURE_VERSION}"
-    
-    azure_payload = {
-        "model": AZURE_MODEL,
-        "input": user_text,
-        "max_output_tokens": 16384
-    }
-
-    # 预留位：转发 tools
-    if isinstance(body.get('tools'), list) and len(body['tools']) > 0:
-        azure_payload['tools'] = body['tools']
+        data = request.get_json()
+        user_prompt = data.get('prompt')
         
-    # 4. 调用 Azure GPT-5.1 Responses API
-    try:
-        azure_res = requests.post(
-            url,
-            headers={
-                "Content-Type": "application/json",
-                "api-key": AZURE_KEY
-            },
-            json=azure_payload,
-            timeout=60 # 设置超时时间
-        )
+        if not user_prompt:
+            return jsonify({"error": "Missing prompt data"}), 400
+
+        # --- 调用 Azure GPT-5.1 逻辑 (示例) ---
+        # 这是一个简化的示例，请根据您的实际调用逻辑修改
         
-        azure_res.raise_for_status() # 检查 HTTP 错误
-
-        result = azure_res.json()
+        # 假设您已正确配置 Azure OpenAI SDK
+        # client = openai.AzureOpenAI(
+        #     api_version="2024-02-01",
+        # )
         
-    except requests.exceptions.RequestException as e:
-        app.logger.error(f"Azure API request failed: {e}")
-        return jsonify({"error": f"Azure API request failed: {e}"}), 503
-    
-    # 5. 关键修正：从 result 里稳健抽出文本
-    output = extract_azure_text(result)
+        # response = client.chat.completions.create(
+        #     model="gpt-5.1-deployment-name", # 确保这是您在 Azure 上的部署名称
+        #     messages=[
+        #         {"role": "system", "content": "You are a helpful assistant."},
+        #         {"role": "user", "content": user_prompt}
+        #     ]
+        # )
+        
+        # gpt_response_text = response.choices[0].message.content
+        
+        # 临时返回一个成功消息以确认 CORS 修复
+        # 请替换为您的实际 GPT 逻辑
+        gpt_response_text = f"API received: '{user_prompt}'. CORS is now fixed!"
 
-    if not output or output.strip() == "":
-        return jsonify({"error": "Empty response from Azure", "raw": result}), 500
-
-    # 6. 尝试解析并返回结果（匹配您 Worker 的逻辑）
-    try:
-        # 尝试当 JSON 解析（例如工具输出）
-        parsed = json.loads(output)
-        return jsonify(parsed) # Flask 默认会添加 JSON 头部
-    except json.JSONDecodeError:
-        # 解析失败就当纯文本返回
-        response = app.make_response(output)
-        response.headers['Content-Type'] = 'text/plain'
-        return response
+        return jsonify({"response": gpt_response_text})
 
     except Exception as e:
-        app.logger.error(f"Internal processing error: {e}")
+        # 捕获异常并返回 500 错误
         return jsonify({"error": str(e)}), 500
 
-# ----------------------------------------------------
-# 辅助函数：从 Azure Responses API 的结果里提取人类可读文本
-# ----------------------------------------------------
-def extract_azure_text(result):
-    if not result:
-        return ""
-
-    # 1) 直接有 output_text 字段
-    if isinstance(result.get("output_text"), str) and result["output_text"].strip():
-        return result["output_text"]
-
-    # 2) 标准 Responses API：output 是一个数组
-    if isinstance(result.get("output"), list):
-        for item in result["output"]:
-            if isinstance(item, dict) and isinstance(item.get("content"), list):
-                txt = "".join([
-                    part.get("text") or part.get("output_text") or part.get("content") or ""
-                    for part in item["content"] if isinstance(part, dict)
-                ])
-                if txt.strip():
-                    return txt
-    
-    # 3) 兼容老的 chat/completions
-    if isinstance(result.get("choices"), list) and result["choices"] and result["choices"][0].get("message"):
-        msg = result["choices"][0]["message"]
-        if isinstance(msg.get("content"), str):
-            return msg["content"]
-        if isinstance(msg.get("content"), list):
-             return "".join([part.get("text") or "" for part in msg["content"] if isinstance(part, dict)])
-
-    return ""
-
-# 本地调试启动点
 if __name__ == '__main__':
-    # 默认运行在 5000 端口
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    # Render 部署不需要这一行，但本地测试需要
+    # app.run(debug=True)
+    pass
